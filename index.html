@@ -18,9 +18,12 @@
   }
   * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif; -webkit-tap-highlight-color: transparent; }
   body { background: var(--bg); color: var(--text); margin: 0; padding: env(safe-area-inset-top, 20px) 18px 40px 18px; }
-  .header { text-align: center; margin: 14px 0 20px 0; }
+  .header { text-align: center; margin: 14px 0 16px 0; }
   .header h1 { font-size: 20px; font-weight: 800; margin: 0; letter-spacing: -0.4px; }
   .badge { display: inline-block; background: rgba(29,185,84,0.15); color: var(--accent); font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 6px; margin-left: 6px; vertical-align: middle; }
+  .mode-switch { display: flex; background: #151922; border: 1px solid var(--border); border-radius: 11px; padding: 4px; margin-bottom: 14px; }
+  .mode-btn { flex: 1; text-align: center; padding: 10px 6px; font-size: 12px; font-weight: 700; border-radius: 8px; color: var(--muted); cursor: pointer; transition: 0.15s; }
+  .mode-btn.active { background: var(--accent); color: #000; }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-bottom: 14px; }
   .label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin-bottom: 8px; display: block; }
   .btn-pick { width: 100%; background: #1e2433; border: 1px dashed #3f475a; color: #e5e7eb; padding: 13px; border-radius: 10px; font-size: 13px; font-weight: 600; text-align: center; cursor: pointer; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -42,7 +45,12 @@
 <body>
 
 <div class="header">
-  <h1>Audio Tagger <span class="badge">320kbps MP3</span></h1>
+  <h1>Audio Tagger <span class="badge" id="mode-badge">Gapless MP3</span></h1>
+</div>
+
+<div class="mode-switch">
+  <div class="mode-btn active" id="mode-mp3" onclick="setMode('mp3')">320kbps MP3 (Spotify Gapless)</div>
+  <div class="mode-btn" id="mode-wav" onclick="setMode('wav')">Lossless WAV (0ms Delay)</div>
 </div>
 
 <div class="card">
@@ -70,9 +78,9 @@
   <input type="text" id="artist-in" placeholder="Artist Name">
   <input type="text" id="album-in" placeholder="Album / EP Name">
   
-  <button class="btn-main" id="encode-btn" onclick="runTagger()">Convert & Tag MP3</button>
+  <button class="btn-main" id="encode-btn" onclick="runTagger()">Convert & Tag (Gapless MP3)</button>
   <button class="btn-main" id="share-btn" style="display:none; background:#fff; margin-top:10px;" onclick="shareToFiles()">Save to Files</button>
-  <a class="btn-secondary" id="dl-btn">Direct Download MP3</a>
+  <a class="btn-secondary" id="dl-btn">Direct Download</a>
 
   <div class="progress-wrap" id="prog-wrap">
     <div class="progress-bar" id="prog-bar"></div>
@@ -81,13 +89,22 @@
 </div>
 
 <script>
+let exportMode = 'mp3';
 let wavBuffer = null;
 let jpegBytes = null;
 let baseName = "Track";
-let finalMp3File = null;
-let finalMp3Url = null;
+let finalOutFile = null;
+let finalOutUrl = null;
 
-// Handle WAV File Selection
+function setMode(m) {
+  exportMode = m;
+  document.getElementById('mode-mp3').classList.toggle('active', m === 'mp3');
+  document.getElementById('mode-wav').classList.toggle('active', m === 'wav');
+  document.getElementById('mode-badge').textContent = m === 'mp3' ? 'Gapless MP3' : 'Lossless WAV';
+  document.getElementById('encode-btn').textContent = m === 'mp3' ? 'Convert & Tag (Gapless MP3)' : 'Tag Lossless WAV (Instant)';
+  resetOutputs();
+}
+
 document.getElementById('wav-in').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
@@ -103,7 +120,6 @@ document.getElementById('wav-in').addEventListener('change', async (e) => {
   resetOutputs();
 });
 
-// Handle Artwork from Either Photos or Files (Auto-converts to Spotify-ready JPEG)
 async function handleArtwork(file, btnId) {
   if (!file) return;
   const url = URL.createObjectURL(file);
@@ -149,11 +165,10 @@ function resetOutputs() {
   document.getElementById('dl-btn').style.display = 'none';
 }
 
-// Build UTF-16LE ID3v2.3 Text Frame (Supports Turkish & all Unicode characters in Spotify)
 function makeUtf16Frame(id, text) {
   if (!text) return null;
   const strBytes = new Uint8Array(2 + text.length * 2);
-  strBytes[0] = 0xFF; // UTF-16LE BOM
+  strBytes[0] = 0xFF;
   strBytes[1] = 0xFE;
   for (let i = 0; i < text.length; i++) {
     const code = text.charCodeAt(i);
@@ -164,12 +179,85 @@ function makeUtf16Frame(id, text) {
   const frame = new Uint8Array(10 + pLen);
   frame.set([id.charCodeAt(0), id.charCodeAt(1), id.charCodeAt(2), id.charCodeAt(3)], 0);
   frame.set([(pLen >>> 24) & 0xFF, (pLen >>> 16) & 0xFF, (pLen >>> 8) & 0xFF, pLen & 0xFF], 4);
-  frame[10] = 1; // 0x01 = UTF-16 with BOM
+  frame[10] = 1;
   frame.set(strBytes, 11);
   return frame;
 }
 
-// Multi-threaded Web Worker for High-Speed 320kbps Encoding
+// Builds Apple/Spotify iTunSMPB Gapless Playback COMM Frame
+function makeGaplessFrame(encDelay, encPadding, totalSamples) {
+  const hex8 = (n) => Math.max(0, n >>> 0).toString(16).toUpperCase().padStart(8, '0');
+  const hex16 = (n) => Math.max(0, n).toString(16).toUpperCase().padStart(16, '0');
+  const valStr = ` 00000000 ${hex8(encDelay)} ${hex8(encPadding)} ${hex16(totalSamples)} 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000`;
+  
+  const desc = [105, 84, 117, 110, 83, 77, 80, 66, 0]; // "iTunSMPB\0"
+  const valBytes = new TextEncoder().encode(valStr);
+  const pLen = 1 + 3 + desc.length + valBytes.length;
+  
+  const frame = new Uint8Array(10 + pLen);
+  frame.set([67, 79, 77, 77], 0); // "COMM"
+  frame.set([(pLen >>> 24) & 0xFF, (pLen >>> 16) & 0xFF, (pLen >>> 8) & 0xFF, pLen & 0xFF], 4);
+  frame[10] = 0; // ISO-8859-1
+  frame.set([101, 110, 103], 11); // "eng"
+  frame.set(desc, 14);
+  frame.set(valBytes, 14 + desc.length);
+  return frame;
+}
+
+// Trim excess silent flush frames added by lamejs at the end of the track
+function trimMp3FlushFrames(mp3Bytes, targetFrames) {
+  let count = 0;
+  let offset = 0;
+  const len = mp3Bytes.length;
+  while (offset + 4 <= len && count < targetFrames) {
+    if (mp3Bytes[offset] !== 0xFF || (mp3Bytes[offset + 1] & 0xE0) !== 0xE0) break;
+    const srIdx = (mp3Bytes[offset + 2] >> 2) & 0x03;
+    const pad = (mp3Bytes[offset + 2] >> 1) & 0x01;
+    const srMap = [44100, 48000, 32000];
+    const sr = srMap[srIdx] || 44100;
+    const frameSize = Math.floor((144 * 320000) / sr) + pad;
+    if (frameSize <= 0 || offset + frameSize > len) break;
+    offset += frameSize;
+    count++;
+  }
+  return offset > 0 ? mp3Bytes.subarray(0, offset) : mp3Bytes;
+}
+
+function buildId3v2Tag(extraFrames = []) {
+  const title = document.getElementById('title-in').value.trim();
+  const artist = document.getElementById('artist-in').value.trim();
+  const album = document.getElementById('album-in').value.trim();
+
+  const frames = [];
+  const fTitle = makeUtf16Frame("TIT2", title); if (fTitle) frames.push(fTitle);
+  const fArtist = makeUtf16Frame("TPE1", artist); if (fArtist) frames.push(fArtist);
+  const fAlbum = makeUtf16Frame("TALB", album); if (fAlbum) frames.push(fAlbum);
+  for (const ef of extraFrames) if (ef) frames.push(ef);
+
+  if (jpegBytes) {
+    const mime = [105, 109, 97, 103, 101, 47, 106, 112, 101, 103, 0];
+    const pLen = 1 + mime.length + 2 + jpegBytes.length;
+    const apic = new Uint8Array(10 + pLen);
+    apic.set([65, 80, 73, 67], 0);
+    apic.set([(pLen >>> 24) & 0xFF, (pLen >>> 16) & 0xFF, (pLen >>> 8) & 0xFF, pLen & 0xFF], 4);
+    apic[10] = 0;
+    apic.set(mime, 11);
+    apic[11 + mime.length] = 3;
+    apic[12 + mime.length] = 0;
+    apic.set(jpegBytes, 13 + mime.length);
+    frames.push(apic);
+  }
+
+  let fTotal = 0;
+  for (const f of frames) fTotal += f.length;
+
+  const id3 = new Uint8Array(10 + fTotal);
+  id3.set([73, 68, 51, 3, 0, 0, (fTotal >> 21) & 0x7F, (fTotal >> 14) & 0x7F, (fTotal >> 7) & 0x7F, fTotal & 0x7F], 0);
+  let offset = 10;
+  for (const f of frames) { id3.set(f, offset); offset += f.length; }
+  return id3;
+}
+
 const workerCode = `
 importScripts('https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.all.min.js');
 self.onmessage = function(e) {
@@ -209,14 +297,41 @@ async function runTagger() {
   const status = document.getElementById('status');
   const progWrap = document.getElementById('prog-wrap');
   const progBar = document.getElementById('prog-bar');
+  const title = document.getElementById('title-in').value.trim();
 
   btn.disabled = true;
   resetOutputs();
-  progWrap.style.display = 'block';
-  progBar.style.width = '5%';
-  status.textContent = "Decoding WAV audio...";
 
   try {
+    if (exportMode === 'wav') {
+      // Instant Lossless WAV Tagging (0ms Delay)
+      status.textContent = "Injecting ID3 chunk into Lossless WAV...";
+      const srcBytes = new Uint8Array(wavBuffer);
+      const id3Tag = buildId3v2Tag();
+      const cLen = id3Tag.length;
+      const padByte = cLen % 2 !== 0 ? 1 : 0;
+      const id3Chunk = new Uint8Array(8 + cLen + padByte);
+      id3Chunk.set([105, 100, 51, 32], 0); // "id3 "
+      id3Chunk.set([cLen & 0xFF, (cLen >>> 8) & 0xFF, (cLen >>> 16) & 0xFF, (cLen >>> 24) & 0xFF], 4);
+      id3Chunk.set(id3Tag, 8);
+
+      const rawBody = srcBytes.subarray(8);
+      const totalRiffLen = rawBody.length + id3Chunk.length;
+      const outWav = new Uint8Array(8 + totalRiffLen);
+      outWav.set([82, 73, 70, 70], 0); // "RIFF"
+      outWav.set([totalRiffLen & 0xFF, (totalRiffLen >>> 8) & 0xFF, (totalRiffLen >>> 16) & 0xFF, (totalRiffLen >>> 24) & 0xFF], 4);
+      outWav.set(rawBody, 8);
+      outWav.set(id3Chunk, 8 + rawBody.length);
+
+      finishExport(outWav, (title || baseName) + ".wav", "audio/wav");
+      return;
+    }
+
+    // Gapless 320kbps MP3 Mode
+    progWrap.style.display = 'block';
+    progBar.style.width = '5%';
+    status.textContent = "Decoding WAV audio...";
+
     const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const decoded = await audioCtx.decodeAudioData(wavBuffer.slice(0));
     const ch = decoded.numberOfChannels;
@@ -240,15 +355,15 @@ async function runTagger() {
       }
     }
 
-    status.textContent = "Encoding 320kbps MP3 (0%)...";
+    status.textContent = "Encoding Gapless 320kbps MP3 (0%)...";
     const workerBlob = new Blob([workerCode], { type: 'application/javascript' });
     const worker = new Worker(URL.createObjectURL(workerBlob));
 
-    const mp3Bytes = await new Promise((resolve, reject) => {
+    const rawMp3Bytes = await new Promise((resolve, reject) => {
       worker.onmessage = (e) => {
         if (e.data.type === 'prog') {
           progBar.style.width = e.data.pct + '%';
-          status.textContent = "Encoding 320kbps MP3 (" + e.data.pct + "%)...";
+          status.textContent = "Encoding Gapless 320kbps MP3 (" + e.data.pct + "%)...";
         } else if (e.data.type === 'done') {
           worker.terminate();
           resolve(e.data.mp3);
@@ -260,70 +375,53 @@ async function runTagger() {
       worker.postMessage({ left: left16, right: right16, sr, ch }, transfers);
     });
 
-    status.textContent = "Injecting artwork & metadata...";
+    status.textContent = "Applying Gapless Transition Trim & Tags...";
     progBar.style.width = '100%';
 
-    const title = document.getElementById('title-in').value.trim();
-    const artist = document.getElementById('artist-in').value.trim();
-    const album = document.getElementById('album-in').value.trim();
+    // Calculate exact gapless parameters & strip extra silent flush frames
+    const encDelay = 576;
+    const samplesPerFrame = sr >= 32000 ? 1152 : 576;
+    const exactFramesNeeded = Math.ceil((len + encDelay) / samplesPerFrame);
+    const trimmedMp3 = trimMp3FlushFrames(rawMp3Bytes, exactFramesNeeded);
+    const encPadding = Math.max(0, (exactFramesNeeded * samplesPerFrame) - len - encDelay);
 
-    const frames = [];
-    const fTitle = makeUtf16Frame("TIT2", title); if (fTitle) frames.push(fTitle);
-    const fArtist = makeUtf16Frame("TPE1", artist); if (fArtist) frames.push(fArtist);
-    const fAlbum = makeUtf16Frame("TALB", album); if (fAlbum) frames.push(fAlbum);
+    const gaplessFrame = makeGaplessFrame(encDelay, encPadding, len);
+    const id3 = buildId3v2Tag([gaplessFrame]);
 
-    if (jpegBytes) {
-      const mime = [105, 109, 97, 103, 101, 47, 106, 112, 101, 103, 0];
-      const pLen = 1 + mime.length + 2 + jpegBytes.length;
-      const apic = new Uint8Array(10 + pLen);
-      apic.set([65, 80, 73, 67], 0);
-      apic.set([(pLen >>> 24) & 0xFF, (pLen >>> 16) & 0xFF, (pLen >>> 8) & 0xFF, pLen & 0xFF], 4);
-      apic[10] = 0;
-      apic.set(mime, 11);
-      apic[11 + mime.length] = 3;
-      apic[12 + mime.length] = 0;
-      apic.set(jpegBytes, 13 + mime.length);
-      frames.push(apic);
-    }
-
-    let fTotal = 0;
-    for (const f of frames) fTotal += f.length;
-
-    const id3 = new Uint8Array(10 + fTotal);
-    id3.set([73, 68, 51, 3, 0, 0, (fTotal >> 21) & 0x7F, (fTotal >> 14) & 0x7F, (fTotal >> 7) & 0x7F, fTotal & 0x7F], 0);
-    let offset = 10;
-    for (const f of frames) { id3.set(f, offset); offset += f.length; }
-
-    const out = new Uint8Array(id3.length + mp3Bytes.length);
+    const out = new Uint8Array(id3.length + trimmedMp3.length);
     out.set(id3, 0);
-    out.set(mp3Bytes, id3.length);
+    out.set(trimmedMp3, id3.length);
 
-    const outName = (title || baseName) + ".mp3";
-    const blob = new Blob([out], { type: 'audio/mpeg' });
-    finalMp3File = new File([blob], outName, { type: 'audio/mpeg' });
-
-    if (finalMp3Url) URL.revokeObjectURL(finalMp3Url);
-    finalMp3Url = URL.createObjectURL(blob);
-
-    const dlBtn = document.getElementById('dl-btn');
-    dlBtn.href = finalMp3Url;
-    dlBtn.download = outName;
-    dlBtn.style.display = 'block';
-
-    document.getElementById('share-btn').style.display = 'block';
-    status.textContent = "Done! Tap 'Save to Files' below.";
-    btn.disabled = false;
+    finishExport(out, (title || baseName) + ".mp3", "audio/mpeg");
   } catch (err) {
     status.textContent = "Error: " + err.message;
     btn.disabled = false;
   }
 }
 
+function finishExport(byteArray, outName, mimeType) {
+  const blob = new Blob([byteArray], { type: mimeType });
+  finalOutFile = new File([blob], outName, { type: mimeType });
+
+  if (finalOutUrl) URL.revokeObjectURL(finalOutUrl);
+  finalOutUrl = URL.createObjectURL(blob);
+
+  const dlBtn = document.getElementById('dl-btn');
+  dlBtn.href = finalOutUrl;
+  dlBtn.download = outName;
+  dlBtn.textContent = "Direct Download (" + outName + ")";
+  dlBtn.style.display = 'block';
+
+  document.getElementById('share-btn').style.display = 'block';
+  document.getElementById('status').textContent = "Done! Tap 'Save to Files' below.";
+  document.getElementById('encode-btn').disabled = false;
+}
+
 async function shareToFiles() {
-  if (!finalMp3File) return;
-  if (navigator.canShare && navigator.canShare({ files: [finalMp3File] })) {
+  if (!finalOutFile) return;
+  if (navigator.canShare && navigator.canShare({ files: [finalOutFile] })) {
     try {
-      await navigator.share({ files: [finalMp3File], title: finalMp3File.name });
+      await navigator.share({ files: [finalOutFile], title: finalOutFile.name });
     } catch (e) {}
   } else {
     document.getElementById('dl-btn').click();
