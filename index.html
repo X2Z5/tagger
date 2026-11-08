@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Audio Tagger">
+<title>Audio Tagger Studio</title>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --card: #151922;
+    --border: #262c3a;
+    --accent: #1db954;
+    --text: #f3f4f6;
+    --muted: #9ca3af;
+  }
+  * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif; -webkit-tap-highlight-color: transparent; }
+  body { background: var(--bg); color: var(--text); margin: 0; padding: env(safe-area-inset-top, 20px) 18px 40px 18px; }
+  .header { text-align: center; margin: 14px 0 20px 0; }
+  .header h1 { font-size: 20px; font-weight: 800; margin: 0; letter-spacing: -0.4px; }
+  .badge { display: inline-block; background: rgba(29,185,84,0.15); color: var(--accent); font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 6px; margin-left: 6px; vertical-align: middle; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-bottom: 14px; }
+  .label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin-bottom: 8px; display: block; }
+  .btn-pick { width: 100%; background: #1e2433; border: 1px dashed #3f475a; color: #e5e7eb; padding: 13px; border-radius: 10px; font-size: 13px; font-weight: 600; text-align: center; cursor: pointer; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .btn-pick.loaded { border-style: solid; border-color: var(--accent); color: var(--accent); background: rgba(29,185,84,0.08); }
+  .art-row { display: flex; gap: 12px; align-items: center; }
+  #art-preview { width: 76px; height: 76px; border-radius: 10px; background: #08090c; border: 1px solid var(--border); object-fit: cover; flex-shrink: 0; display: none; }
+  .art-buttons { display: flex; flex-direction: column; gap: 8px; flex: 1; }
+  input[type="text"] { width: 100%; background: #08090c; border: 1px solid var(--border); color: #fff; padding: 12px; border-radius: 9px; font-size: 15px; margin-bottom: 10px; outline: none; }
+  input[type="text"]:focus { border-color: var(--accent); }
+  input[type="file"] { display: none; }
+  .btn-main { width: 100%; background: var(--accent); color: #000; border: none; padding: 15px; border-radius: 11px; font-size: 15px; font-weight: 800; cursor: pointer; margin-top: 4px; }
+  .btn-main:disabled { background: #262c3a; color: #6b7280; cursor: not-allowed; }
+  .btn-secondary { width: 100%; background: #232938; color: #fff; border: 1px solid var(--border); padding: 13px; border-radius: 11px; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 10px; display: none; text-align: center; text-decoration: none; }
+  .progress-wrap { width: 100%; height: 6px; background: #08090c; border-radius: 4px; overflow: hidden; margin-top: 12px; display: none; }
+  .progress-bar { width: 0%; height: 100%; background: var(--accent); transition: width 0.1s linear; }
+  #status { text-align: center; font-size: 13px; color: var(--muted); margin-top: 10px; font-weight: 500; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Audio Tagger <span class="badge">320kbps MP3</span></h1>
+</div>
+
+<div class="card">
+  <span class="label">1. Audio File (.WAV)</span>
+  <div class="btn-pick" id="wav-btn" onclick="document.getElementById('wav-in').click()">Select .WAV from Files</div>
+  <input type="file" id="wav-in" accept=".wav,audio/wav,audio/x-wav,audio/*">
+</div>
+
+<div class="card">
+  <span class="label">2. Cover Artwork</span>
+  <div class="art-row">
+    <img id="art-preview" alt="Cover">
+    <div class="art-buttons">
+      <div class="btn-pick" id="photo-btn" onclick="document.getElementById('photo-in').click()">Pick from Photos</div>
+      <div class="btn-pick" id="file-art-btn" onclick="document.getElementById('file-art-in').click()">Pick from Files</div>
+    </div>
+  </div>
+  <input type="file" id="photo-in" accept="image/*">
+  <input type="file" id="file-art-in">
+</div>
+
+<div class="card">
+  <span class="label">3. Song Details</span>
+  <input type="text" id="title-in" placeholder="Song Title">
+  <input type="text" id="artist-in" placeholder="Artist Name">
+  <input type="text" id="album-in" placeholder="Album / EP Name">
+  
+  <button class="btn-main" id="encode-btn" onclick="runTagger()">Convert & Tag MP3</button>
+  <button class="btn-main" id="share-btn" style="display:none; background:#fff; margin-top:10px;" onclick="shareToFiles()">Save to Files</button>
+  <a class="btn-secondary" id="dl-btn">Direct Download MP3</a>
+
+  <div class="progress-wrap" id="prog-wrap">
+    <div class="progress-bar" id="prog-bar"></div>
+  </div>
+  <div id="status">Ready</div>
+</div>
+
+<script>
+let wavBuffer = null;
+let jpegBytes = null;
+let baseName = "Track";
+let finalMp3File = null;
+let finalMp3Url = null;
+
+// Handle WAV File Selection
+document.getElementById('wav-in').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  baseName = file.name.replace(/\.[^/.]+$/, "");
+  const btn = document.getElementById('wav-btn');
+  btn.textContent = "Loading " + file.name + "...";
+  wavBuffer = await file.arrayBuffer();
+  btn.textContent = "✓ " + file.name;
+  btn.classList.add('loaded');
+  if (!document.getElementById('title-in').value) {
+    document.getElementById('title-in').value = baseName;
+  }
+  resetOutputs();
+});
+
+// Handle Artwork from Either Photos or Files (Auto-converts to Spotify-ready JPEG)
+async function handleArtwork(file, btnId) {
+  if (!file) return;
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    const canvas = document.createElement('canvas');
+    const maxDim = 1000;
+    let w = img.width, h = img.height;
+    if (w > maxDim || h > maxDim) {
+      if (w > h) { h = Math.round(h * (maxDim / w)); w = maxDim; }
+      else { w = Math.round(w * (maxDim / h)); h = maxDim; }
+    }
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0, w, h);
+    
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+    const preview = document.getElementById('art-preview');
+    preview.src = dataUrl;
+    preview.style.display = 'block';
+
+    const b64 = dataUrl.split(',')[1];
+    const bin = atob(b64);
+    jpegBytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) jpegBytes[i] = bin.charCodeAt(i);
+
+    document.getElementById('photo-btn').classList.remove('loaded');
+    document.getElementById('file-art-btn').classList.remove('loaded');
+    const activeBtn = document.getElementById(btnId);
+    activeBtn.textContent = "✓ " + file.name;
+    activeBtn.classList.add('loaded');
+    resetOutputs();
+  };
+  img.src = url;
+}
+
+document.getElementById('photo-in').addEventListener('change', (e) => handleArtwork(e.target.files[0], 'photo-btn'));
+document.getElementById('file-art-in').addEventListener('change', (e) => handleArtwork(e.target.files[0], 'file-art-btn'));
+
+function resetOutputs() {
+  document.getElementById('share-btn').style.display = 'none';
+  document.getElementById('dl-btn').style.display = 'none';
+}
+
+// Build UTF-16LE ID3v2.3 Text Frame (Supports Turkish & all Unicode characters in Spotify)
+function makeUtf16Frame(id, text) {
+  if (!text) return null;
+  const strBytes = new Uint8Array(2 + text.length * 2);
+  strBytes[0] = 0xFF; // UTF-16LE BOM
+  strBytes[1] = 0xFE;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    strBytes[2 + i * 2] = code & 0xFF;
+    strBytes[2 + i * 2 + 1] = (code >> 8) & 0xFF;
+  }
+  const pLen = 1 + strBytes.length;
+  const frame = new Uint8Array(10 + pLen);
+  frame.set([id.charCodeAt(0), id.charCodeAt(1), id.charCodeAt(2), id.charCodeAt(3)], 0);
+  frame.set([(pLen >>> 24) & 0xFF, (pLen >>> 16) & 0xFF, (pLen >>> 8) & 0xFF, pLen & 0xFF], 4);
+  frame[10] = 1; // 0x01 = UTF-16 with BOM
+  frame.set(strBytes, 11);
+  return frame;
+}
+
+// Multi-threaded Web Worker for High-Speed 320kbps Encoding
+const workerCode = `
+importScripts('https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.all.min.js');
+self.onmessage = function(e) {
+  const { left, right, sr, ch } = e.data;
+  const enc = new lamejs.Mp3Encoder(ch, sr, 320);
+  const chunks = [];
+  const len = left.length;
+  const block = 11520;
+  let lastPct = 0;
+
+  for (let i = 0; i < len; i += block) {
+    const lc = left.subarray(i, i + block);
+    const buf = ch === 1 ? enc.encodeBuffer(lc) : enc.encodeBuffer(lc, right.subarray(i, i + block));
+    if (buf.length > 0) chunks.push(new Uint8Array(buf));
+    const pct = Math.round((i / len) * 100);
+    if (pct >= lastPct + 5) {
+      lastPct = pct;
+      self.postMessage({ type: 'prog', pct });
+    }
+  }
+  const flush = enc.flush();
+  if (flush.length > 0) chunks.push(new Uint8Array(flush));
+
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const mp3 = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) { mp3.set(c, off); off += c.length; }
+
+  self.postMessage({ type: 'done', mp3 }, [mp3.buffer]);
+};
+`;
+
+async function runTagger() {
+  if (!wavBuffer) { alert("Please select a WAV file first."); return; }
+  const btn = document.getElementById('encode-btn');
+  const status = document.getElementById('status');
+  const progWrap = document.getElementById('prog-wrap');
+  const progBar = document.getElementById('prog-bar');
+
+  btn.disabled = true;
+  resetOutputs();
+  progWrap.style.display = 'block';
+  progBar.style.width = '5%';
+  status.textContent = "Decoding WAV audio...";
+
+  try {
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const decoded = await audioCtx.decodeAudioData(wavBuffer.slice(0));
+    const ch = decoded.numberOfChannels;
+    const sr = decoded.sampleRate;
+    const len = decoded.length;
+
+    const leftF = decoded.getChannelData(0);
+    const left16 = new Int16Array(len);
+    for (let i = 0; i < len; i++) {
+      const s = leftF[i];
+      left16[i] = s < 0 ? (s < -1 ? -32768 : s * 32768) : (s > 1 ? 32767 : s * 32767);
+    }
+
+    let right16 = null;
+    if (ch > 1) {
+      const rightF = decoded.getChannelData(1);
+      right16 = new Int16Array(len);
+      for (let i = 0; i < len; i++) {
+        const s = rightF[i];
+        right16[i] = s < 0 ? (s < -1 ? -32768 : s * 32768) : (s > 1 ? 32767 : s * 32767);
+      }
+    }
+
+    status.textContent = "Encoding 320kbps MP3 (0%)...";
+    const workerBlob = new Blob([workerCode], { type: 'application/javascript' });
+    const worker = new Worker(URL.createObjectURL(workerBlob));
+
+    const mp3Bytes = await new Promise((resolve, reject) => {
+      worker.onmessage = (e) => {
+        if (e.data.type === 'prog') {
+          progBar.style.width = e.data.pct + '%';
+          status.textContent = "Encoding 320kbps MP3 (" + e.data.pct + "%)...";
+        } else if (e.data.type === 'done') {
+          worker.terminate();
+          resolve(e.data.mp3);
+        }
+      };
+      worker.onerror = (err) => { worker.terminate(); reject(err); };
+      const transfers = [left16.buffer];
+      if (right16) transfers.push(right16.buffer);
+      worker.postMessage({ left: left16, right: right16, sr, ch }, transfers);
+    });
+
+    status.textContent = "Injecting artwork & metadata...";
+    progBar.style.width = '100%';
+
+    const title = document.getElementById('title-in').value.trim();
+    const artist = document.getElementById('artist-in').value.trim();
+    const album = document.getElementById('album-in').value.trim();
+
+    const frames = [];
+    const fTitle = makeUtf16Frame("TIT2", title); if (fTitle) frames.push(fTitle);
+    const fArtist = makeUtf16Frame("TPE1", artist); if (fArtist) frames.push(fArtist);
+    const fAlbum = makeUtf16Frame("TALB", album); if (fAlbum) frames.push(fAlbum);
+
+    if (jpegBytes) {
+      const mime = [105, 109, 97, 103, 101, 47, 106, 112, 101, 103, 0];
+      const pLen = 1 + mime.length + 2 + jpegBytes.length;
+      const apic = new Uint8Array(10 + pLen);
+      apic.set([65, 80, 73, 67], 0);
+      apic.set([(pLen >>> 24) & 0xFF, (pLen >>> 16) & 0xFF, (pLen >>> 8) & 0xFF, pLen & 0xFF], 4);
+      apic[10] = 0;
+      apic.set(mime, 11);
+      apic[11 + mime.length] = 3;
+      apic[12 + mime.length] = 0;
+      apic.set(jpegBytes, 13 + mime.length);
+      frames.push(apic);
+    }
+
+    let fTotal = 0;
+    for (const f of frames) fTotal += f.length;
+
+    const id3 = new Uint8Array(10 + fTotal);
+    id3.set([73, 68, 51, 3, 0, 0, (fTotal >> 21) & 0x7F, (fTotal >> 14) & 0x7F, (fTotal >> 7) & 0x7F, fTotal & 0x7F], 0);
+    let offset = 10;
+    for (const f of frames) { id3.set(f, offset); offset += f.length; }
+
+    const out = new Uint8Array(id3.length + mp3Bytes.length);
+    out.set(id3, 0);
+    out.set(mp3Bytes, id3.length);
+
+    const outName = (title || baseName) + ".mp3";
+    const blob = new Blob([out], { type: 'audio/mpeg' });
+    finalMp3File = new File([blob], outName, { type: 'audio/mpeg' });
+
+    if (finalMp3Url) URL.revokeObjectURL(finalMp3Url);
+    finalMp3Url = URL.createObjectURL(blob);
+
+    const dlBtn = document.getElementById('dl-btn');
+    dlBtn.href = finalMp3Url;
+    dlBtn.download = outName;
+    dlBtn.style.display = 'block';
+
+    document.getElementById('share-btn').style.display = 'block';
+    status.textContent = "Done! Tap 'Save to Files' below.";
+    btn.disabled = false;
+  } catch (err) {
+    status.textContent = "Error: " + err.message;
+    btn.disabled = false;
+  }
+}
+
+async function shareToFiles() {
+  if (!finalMp3File) return;
+  if (navigator.canShare && navigator.canShare({ files: [finalMp3File] })) {
+    try {
+      await navigator.share({ files: [finalMp3File], title: finalMp3File.name });
+    } catch (e) {}
+  } else {
+    document.getElementById('dl-btn').click();
+  }
+}
+</script>
+</body>
+</html>
